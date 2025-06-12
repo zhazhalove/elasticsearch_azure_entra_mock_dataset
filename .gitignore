@@ -1,0 +1,4 @@
+/.venv
+/bulk_synthetic_entra_signin_last_14_days.ndjson
+/bulk_synthetic_entra_signin_last_1_year.ndjson
+/scratch.ipynb

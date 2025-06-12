@@ -1,0 +1,127 @@
+PUT _transform/entra_impossible_travel_daily
+{
+  "source": {
+    "index": "azure_entra_signin_logs",
+    "query": {
+      "range": { "@timestamp": { "gte": "now-30d" } }
+    }
+  },
+
+  "dest": { "index": "entra_impossible_travel_daily" },
+
+  "pivot": {
+    "group_by": {
+      "user_name": {
+        "terms": { "field": "user.name.keyword" }
+      },
+      "login_day": {
+        "date_histogram": {
+          "field": "@timestamp",
+          "calendar_interval": "1d",
+          "time_zone": "UTC"
+        }
+      }
+    },
+
+    "aggregations": {
+      "speed_kmh": {
+        "scripted_metric": {
+          "init_script": """
+            state.prev = null;
+            state.max  = 0.0;
+          """,
+          "map_script": """
+            def ts  = doc['@timestamp'].value.toInstant().toEpochMilli();
+            def lat = doc['geo.location.lat'].value;
+            def lon = doc['geo.location.lon'].value;
+
+            if (state.prev != null) {
+              double R = 6371;
+              double dLat = Math.toRadians(lat - state.prev.lat);
+              double dLon = Math.toRadians(lon - state.prev.lon);
+              double a = Math.sin(dLat/2d) * Math.sin(dLat/2d) +
+                         Math.cos(Math.toRadians(state.prev.lat)) *
+                         Math.cos(Math.toRadians(lat)) *
+                         Math.sin(dLon/2d) * Math.sin(dLon/2d);
+              double c  = 2d * Math.atan2(Math.sqrt(a), Math.sqrt(1d - a));
+              double km = R * c;
+
+              double hrs = (ts - state.prev.ts) / 3.6e6;
+              if (hrs > 0d) {
+                double spd = km / hrs;
+                if (spd > state.max) state.max = spd;
+              }
+            }
+            state.prev = ['ts': ts, 'lat': lat, 'lon': lon];
+          """,
+
+          
+          "combine_script": """
+            return ['max': state.max, 'last': state.prev];
+          """,
+
+          
+          "reduce_script": """
+            double globalMax = 0;
+            def lastPoint = null;
+
+            for (seg in states) {
+              if (seg.max > globalMax) globalMax = seg.max;
+
+              if (lastPoint != null && seg.last != null) {
+                // compute cross-segment speed (last of previous → first of this)
+                double R = 6371;
+                double dLat = Math.toRadians(seg.last.lat - lastPoint.lat);
+                double dLon = Math.toRadians(seg.last.lon - lastPoint.lon);
+                double a = Math.sin(dLat/2d)*Math.sin(dLat/2d) +
+                           Math.cos(Math.toRadians(lastPoint.lat)) *
+                           Math.cos(Math.toRadians(seg.last.lat)) *
+                           Math.sin(dLon/2d)*Math.sin(dLon/2d);
+                double c  = 2d * Math.atan2(Math.sqrt(a), Math.sqrt(1d - a));
+                double km = R * c;
+
+                double hrs = (seg.last.ts - lastPoint.ts) / 3.6e6;
+                if (hrs > 0d) {
+                  double spd = km / hrs;
+                  if (spd > globalMax) globalMax = spd;
+                }
+              }
+
+              if (seg.last != null) {
+                lastPoint = seg.last;
+              }
+            }
+            return globalMax;
+          """
+        }
+      },
+
+      "last_ts": { "max": { "field": "@timestamp" } },
+
+      "last_ip": {
+        "top_metrics": {
+          "metrics": [{ "field": "client.ip.keyword" }],
+          "sort": { "@timestamp": "desc" }
+        }
+      },
+      "last_lat": {
+        "top_metrics": {
+          "metrics": [{ "field": "geo.location.lat" }],
+          "sort": { "@timestamp": "desc" }
+        }
+      },
+      "last_lon": {
+        "top_metrics": {
+          "metrics": [{ "field": "geo.location.lon" }],
+          "sort": { "@timestamp": "desc" }
+        }
+      }
+    }
+  },
+
+  "sync": { "time": { "field": "@timestamp", "delay": "60s" } },
+
+  "retention_policy": {
+    "time": { "field": "login_day", "max_age": "30d" }
+  }
+}
