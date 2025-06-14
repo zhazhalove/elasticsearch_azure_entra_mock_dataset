@@ -1,4 +1,3 @@
-PUT _transform/entra_impossible_travel_daily
 {
   "source": {
     "index": "azure_entra_signin_logs",
