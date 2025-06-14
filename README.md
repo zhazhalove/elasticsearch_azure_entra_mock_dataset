@@ -5,14 +5,17 @@
 
 ## 0 Table of Contents
 1. [Why do we need this?](#1)  
-2. [What *is* a transform?](#2)  
-3. [Full transform listing (annotated)](#3)  
-4. [Scripted‑Metric — fundamental concepts](#4)  
-5. [Document life‑cycle — step‑by‑step walkthrough](#5)  
-6. [Index‑sorting vs query‑sorting](#6)  
-7. [How to query the roll‑up index](#7)  
-8. [Performance hints & common pitfalls](#8)  
-9. [Mini FAQ](#9)  
+2. [What *is* a transform?](#2)
+3. [line-by-line walkthrough of the ``map_script``](#3)
+4. [``reduce_script`` — line-by-line walk-through](#4)
+5. [Full transform listing (annotated)](#5)  
+6. [Scripted‑Metric — fundamental concepts](#6)  
+7. [Document life‑cycle — step‑by‑step walkthrough](#7)  
+8. [Index‑sorting vs query‑sorting](#8)  
+9. [How to query the roll‑up index](#9)  
+11. [Performance hints & common pitfalls](#11)  
+12. [Mini FAQ](#12)
+13. [Resources](#13)
 
 ---
 
@@ -50,7 +53,7 @@ Transforms run **server‑side** — no Logstash or external ETL required.
 ---
 
 <a name="3"></a>
-## 3 Full transform listing (heavily commented)
+## 3  Full transform listing (heavily commented)
 
 ```jsonc
 PUT _transform/entra_impossible_travel_daily      // ➊ task id
@@ -120,7 +123,126 @@ Legend
 ---
 
 <a name="4"></a>
-## 4 Scripted‑Metric — fundamental concepts
+## 4  line-by-line walkthrough of the ```map_script```
+```
+1  def ts  = doc['@timestamp'].value.toInstant().toEpochMilli();
+2  def lat = doc['geo.location.lat'].value;
+3  def lon = doc['geo.location.lon'].value;
+
+4  if (state.prev != null) {                 // skip the very first doc
+5      double R    = 6371;                   // Earth radius (km)
+6      double dLat = Math.toRadians(lat - state.prev.lat);
+7      double dLon = Math.toRadians(lon - state.prev.lon);
+8      double a = Math.sin(dLat/2d) * Math.sin(dLat/2d) +
+9                 Math.cos(Math.toRadians(state.prev.lat)) *
+10                Math.cos(Math.toRadians(lat)) *
+11                Math.sin(dLon/2d) * Math.sin(dLon/2d);
+12     double c  = 2d * Math.atan2(Math.sqrt(a), Math.sqrt(1d - a));
+13     double km = R * c;
+
+14     double hrs = (ts - state.prev.ts) / 3.6e6;   // ms → h
+15     if (hrs > 0d) {
+16         double spd = km / hrs;                    // km/h
+17         if (spd > state.max) state.max = spd;     // keep record
+18     }
+19 }
+20 state.prev = ['ts': ts, 'lat': lat, 'lon': lon]; // slide window
+```
+
+
+| #         | What it does                                                                                                                                                                                 | Key API & docs                                      |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| **1**     | Reads the `@timestamp` doc-value, converts to Java `Instant`, then to epoch **ms** for easy arithmetic.                                                                                      | *Accessing doc values* ([elastic.co][1])            |
+| **2 & 3** | Pull latitude & longitude (doubles) from `geo.location.*` doc-values.                                                                                                                        | Same `doc['field'].value` access ([elastic.co][1])  |
+| **4**     | If this isn’t the first point in the shard-bucket, compute a hop.                                                                                                                            | `state` Map initialized in `init_script`.           |
+| **5**     | Constant Earth radius in kilometres.                                                                                                                                                         |                                                     |
+| **6–13**  | **Haversine distance** calculation:<br>• `Math.toRadians` converts Δlat/Δlon to radians.<br>• `Math.sin`, `Math.cos`, `Math.atan2`, `Math.sqrt` are allowed Java-`Math` methods in Painless. | *Painless API – `java.lang.Math`* ([elastic.co][2]) |
+| **14**    | Convert time delta from **ms** to **hours** (`/ 3.6 × 10⁶`).                                                                                                                                 |                                                     |
+| **15**    | Guard against pathological negative or zero Δt (can only happen if events were mis-ordered).                                                                                                 |                                                     |
+| **16**    | Speed = km / h.                                                                                                                                                                              |                                                     |
+| **17**    | Keep the shard-local record in `state.max`.                                                                                                                                                  |                                                     |
+| **18**    | End of hop logic.                                                                                                                                                                            |                                                     |
+| **19**    | Close the `if` block.                                                                                                                                                                        |                                                     |
+| **20**    | Store the *current* point so the next doc can compare against it (sliding-window).                                                                                                           |                                                     |
+
+---
+
+<a name="5"></a>
+## 5 ``reduce_script`` — line-by-line walk-through
+(context = scripted_metric aggregation inside a transform)
+
+
+```
+1  double globalMax = 0;
+2  def    lastPoint = null;
+
+3  for (seg in states) {                         // states[] = per-shard summary
+4      if (seg.max > globalMax) globalMax = seg.max;
+
+5      if (lastPoint != null && seg.last != null) {
+6          /* -------- haversine distance -------- */
+7          double R    = 6371;                   // km
+8          double dLat = Math.toRadians(seg.last.lat - lastPoint.lat);
+9          double dLon = Math.toRadians(seg.last.lon - lastPoint.lon);
+10         double a = Math.sin(dLat/2d) * Math.sin(dLat/2d) +
+11                    Math.cos(Math.toRadians(lastPoint.lat)) *
+12                    Math.cos(Math.toRadians(seg.last.lat)) *
+13                    Math.sin(dLon/2d) * Math.sin(dLon/2d);
+14         double c  = 2d * Math.atan2(Math.sqrt(a), Math.sqrt(1d - a));
+15         double km = R * c;
+
+16         /* -------- convert to km/h ----------- */
+17         double hrs = (seg.last.ts - lastPoint.ts) / 3.6e6;
+18         if (hrs > 0d) {
+19             double spd = km / hrs;
+20             if (spd > globalMax) globalMax = spd;
+21         }
+22     }
+
+23     if (seg.last != null) lastPoint = seg.last;   // carry forward
+24 }
+25 return globalMax;
+```
+
+
+|      Line | Code excerpt                        | What happens                                                                                                   | API / doc references                                      |
+| --------: | ----------------------------------- | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+|     **1** | `double globalMax = 0;`             | Initialise result accumulator.                                                                                 | Primitive types in Painless — “Language Basics” → *Types* |
+|     **2** | `def lastPoint = null;`             | Placeholder for the *tail* geo-point from the previous shard.                                                  | Dynamic typing & `def` — “Dynamic Types”                  |
+|     **3** | `for (seg in states)`               | Iterate the array that Painless injects into **reduce context** (`states[]`).                                  | Scripted-metric reduce docs                               |
+|     **4** | `if (seg.max > globalMax)`          | Keep the highest **intra-shard** speed.                                                                        | —                                                         |
+|     **5** | `if (lastPoint …)`                  | Only compute cross-shard hop from second shard onward.                                                         | —                                                         |
+|     **7** | `double R = 6371;`                  | Earth radius constant.                                                                                         | —                                                         |
+|  **8–15** | `dLat … km`                         | **Haversine** distance; uses whitelisted `java.lang.Math` methods: `toRadians`, `sin`, `cos`, `atan2`, `sqrt`. | Painless API — `java.lang.Math` whitelist                 |
+|    **17** | `double hrs = … / 3.6e6`            | Convert epoch-ms delta to hours (3 600 000 ms = 1 h).                                                          | —                                                         |
+| **18–20** | Guard + speed calc + record update. | Protects against negative / zero Δt; updates `globalMax` if cross-shard hop is faster.                         | —                                                         |
+|    **23** | `lastPoint = seg.last`              | Carry this shard’s trailing point so the next shard can stitch its hop.                                        | —                                                         |
+|    **25** | `return globalMax;`                 | Single value emitted for the bucket; becomes `speed_kmh` field in the dest index.                              | Scripted-metric `reduce_script` return                    |
+                                                               |
+
+**Key take-aways**
+1. states array = per-shard summaries produced by combine_script.
+You choose the structure; the runtime just hands it back to you. 
+elastic.co
+
+2. Cross-shard hops are your responsibility.
+Elasticsearch never re-orders or merges shard results — the reduce script must do that.
+
+3. All math relies on java.lang.Math, which is part of the shared whitelist available in any Painless context. 
+elastic.co
+
+With this loop the transform captures both:
+
+ - the fastest hop inside any single shard, and
+
+ - the fastest hop that crosses shard boundaries,
+
+yielding an accurate speed_kmh for every user-day bucket.
+
+---
+
+<a name="6"></a>
+## 6 Scripted‑Metric — fundamental concepts
 
 | Stage          | Runs **where**   | Input                         | You write… | Purpose |
 |----------------|------------------|-------------------------------|------------|---------|
@@ -134,8 +256,8 @@ Legend
 
 ---
 
-<a name="5"></a>
-## 5 Document life‑cycle — step‑by‑step
+<a name="7"></a>
+## 7 Document life‑cycle — step‑by‑step
 
 ### 5.1 Shard layout (example)
 | Node | Primary shards of `azure_entra_signin_logs` |
@@ -185,8 +307,8 @@ Result document (rolled‑up):
 
 ---
 
-<a name="6"></a>
-## 6 Index‑sorting vs Query‑sorting
+<a name="8"></a>
+## 8 Index‑sorting vs Query‑sorting
 
 | Approach | Pros | Cons | Syntax |
 |----------|------|------|--------|
@@ -197,8 +319,8 @@ If neither is used, Lucene gives docs in *segment order* (basically random).
 
 ---
 
-<a name="7"></a>
-## 7 How to interrogate the roll‑up index
+<a name="9"></a>
+## 9 How to interrogate the roll‑up index
 
 ```http
 # Who broke the sound barrier yesterday?
@@ -219,8 +341,8 @@ GET entra_impossible_travel_daily/_search
 
 ---
 
-<a name="8"></a>
-## 8 Performance hints & pitfalls
+<a name="10"></a>
+## 10 Performance hints & pitfalls
 
 * **Shard size** — smaller shards (5–10 GB) finish map‑phase faster.
 * **`page_size`** transform setting — raise if you have thousands of docs per user‑day.
@@ -229,8 +351,8 @@ GET entra_impossible_travel_daily/_search
 
 ---
 
-<a name="9"></a>
-## 9 Mini FAQ
+<a name="11"></a>
+## 11 Mini FAQ
 
 <details>
 <summary>Q: Can I emit *all* hop speeds instead of just max?</summary>
@@ -251,3 +373,27 @@ against `doc['geo.location.lat'].empty` inside `map_script`.
 
 Yes.  Omit `"sync"` and use `POST _transform/<id>/_start?timeout=...` from a cron job.
 </details>
+
+<a name="12"></a>
+## 12 Resources
+
+- Painless API Reference
+https://www.elastic.co/guide/en/elasticsearch/painless/current/painless-api-reference.html
+
+- "Painless API Reference | Painless Scripting Language [8.17] - Elastic" https://www.elastic.co/guide/en/elasticsearch/painless/current/painless-api-reference.html?utm_source=chatgpt.com
+
+- "Shared API for package java.text | Painless Scripting Language [8.17]" https://www.elastic.co/guide/en/elasticsearch/painless/current/painless-api-reference-shared-java-text.html?utm_source=chatgpt.com
+
+- "Scripted metric aggregation | Elasticsearch Guide [8.18] | Elastic"
+ https://www.elastic.co/guide/en/elasticsearch/reference/8.18/search-aggregations-metrics-scripted-metric-aggregation.html?utm_source=chatgpt.com
+
+- "Shared API for package java.lang | Painless Scripting Language [8.18]" https://www.elastic.co/guide/en/elasticsearch/painless/8.18/painless-api-reference-shared-java-lang.html?utm_source=chatgpt.com
+
+- ``doc['field']`` access & value/size() helpers
+https://www.elastic.co/guide/en/elasticsearch/reference/current/modules-scripting-fields.html 
+elastic.co
+
+- ``java.lang.Math`` & other allowed classes
+https://www.elastic.co/guide/en/elasticsearch/painless/current/painless-api-reference.html → Shared API → java.lang 
+elastic.co
+
