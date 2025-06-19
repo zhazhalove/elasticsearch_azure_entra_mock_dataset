@@ -317,6 +317,44 @@ Result document (rolled‑up):
 
 If neither is used, Lucene gives docs in *segment order* (basically random).
 
+
+example - index level sort
+```
+{
+  "index_templates": [
+    {
+      "name": "entra_signin_tmpl",
+      "index_template": {
+        "index_patterns": [
+          "azure_entra_signin_logs*"
+        ],
+        "template": {
+          "settings": {
+            "index": {
+              "number_of_shards": "2",
+              "number_of_replicas": "1",
+              "sort": {
+                "field": "@timestamp",
+                "order": "asc"
+              }
+            }
+          },
+          "mappings": {
+            "properties": {
+              "@timestamp": {
+                "type": "date"
+              }
+            }
+          }
+        },
+        "composed_of": [],
+        "priority": 500
+      }
+    }
+  ]
+}
+```
+
 ---
 
 <a name="9"></a>
