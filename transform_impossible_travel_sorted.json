@@ -1,0 +1,150 @@
+PUT _transform/transform_impossible_travel_sorted
+{
+  "source": {
+    "index": "azure_entra_signin_logs",
+    "query": {
+      "range": { "@timestamp": { "gte": "now-30d" } }
+    }
+  },
+  "dest": { "index": "entra_impossible_travel_daily" },
+  "pivot": {
+    "group_by": {
+      "user_name": { "terms": { "field": "user.name.keyword" } },
+      "login_day": {
+        "date_histogram": {
+          "field": "@timestamp",
+          "calendar_interval": "1d",
+          "time_zone": "UTC"
+        }
+      }
+    },
+    "aggregations": {
+      "speed_kmh": {
+        "scripted_metric": {
+          "init_script": """
+            state.locations = [];
+          """,
+          "map_script": """
+            state.locations.add([
+              'ts': doc['@timestamp'].value.toInstant().toEpochMilli(),
+              'lat': doc['geo.location.lat'].value,
+              'lon': doc['geo.location.lon'].value
+            ]);
+          """,
+          "combine_script": """
+            if (state.locations.size() == 0) {
+              return null;
+            }
+
+            Collections.sort(state.locations, Comparator.comparing(l -> l.ts));
+
+            double maxSpeed = 0.0;
+            if (state.locations.size() > 1) {
+              for (int i = 1; i < state.locations.size(); i++) {
+                def prev = state.locations.get(i-1);
+                def curr = state.locations.get(i);
+                
+                double R = 6371;
+                double dLat = Math.toRadians(curr.lat - prev.lat);
+                double dLon = Math.toRadians(curr.lon - prev.lon);
+                double a = Math.sin(dLat/2d) * Math.sin(dLat/2d) +
+                           Math.cos(Math.toRadians(prev.lat)) *
+                           Math.cos(Math.toRadians(curr.lat)) *
+                           Math.sin(dLon/2d) * Math.sin(dLon/2d);
+                double c  = 2d * Math.atan2(Math.sqrt(a), Math.sqrt(1d - a));
+                double km = R * c;
+
+                double hrs = (curr.ts - prev.ts) / 3.6e6;
+                if (hrs > 0d) {
+                  double spd = km / hrs;
+                  if (spd > maxSpeed) {
+                    maxSpeed = spd;
+                  }
+                }
+              }
+            }
+            
+            return [
+              'max_speed': maxSpeed,
+              'first': state.locations.get(0),
+              'last': state.locations.get(state.locations.size() - 1)
+            ];
+          """,
+          "reduce_script": """
+            List nonNullStates = new ArrayList();
+            for (state in states) {
+              if (state != null) {
+                nonNullStates.add(state);
+              }
+            }
+
+            if (nonNullStates.size() == 0) {
+              return 0.0;
+            }
+
+            Collections.sort(nonNullStates, Comparator.comparing(s -> s.first.ts));
+            
+            double globalMax = 0.0;
+            Map lastPointFromPreviousShard = null;
+
+            for (state in nonNullStates) {
+              if (state.max_speed > globalMax) {
+                globalMax = state.max_speed;
+              }
+
+              if (lastPointFromPreviousShard != null) {
+                // This is the crucial cross-shard boundary calculation
+                def prev = lastPointFromPreviousShard;
+                def curr = state.first;
+
+                double R = 6371;
+                double dLat = Math.toRadians(curr.lat - prev.lat);
+                double dLon = Math.toRadians(curr.lon - prev.lon);
+                double a = Math.sin(dLat/2d) * Math.sin(dLat/2d) +
+                           Math.cos(Math.toRadians(prev.lat)) *
+                           Math.cos(Math.toRadians(curr.lat)) *
+                           Math.sin(dLon/2d) * Math.sin(dLon/2d);
+                double c  = 2d * Math.atan2(Math.sqrt(a), Math.sqrt(1d - a));
+                double km = R * c;
+
+                double hrs = (curr.ts - prev.ts) / 3.6e6;
+                if (hrs > 0d) {
+                  double spd = km / hrs;
+                  if (spd > globalMax) {
+                    globalMax = spd;
+                  }
+                }
+              }
+              
+              lastPointFromPreviousShard = state.last;
+            }
+            return globalMax;
+          """
+        }
+      },
+      "last_ts": { "max": { "field": "@timestamp" } },
+      "last_ip": {
+        "top_metrics": {
+          "metrics": [{ "field": "client.ip.keyword" }],
+          "sort": { "@timestamp": "desc" }
+        }
+      },
+      "last_lat": {
+        "top_metrics": {
+          "metrics": [{ "field": "geo.location.lat" }],
+          "sort": { "@timestamp": "desc" }
+        }
+      },
+      "last_lon": {
+        "top_metrics": {
+          "metrics": [{ "field": "geo.location.lon" }],
+          "sort": { "@timestamp": "desc" }
+        }
+      }
+    }
+  },
+  "sync": { "time": { "field": "@timestamp", "delay": "60s" } },
+  "retention_policy": {
+    "time": { "field": "login_day", "max_age": "30d" }
+  }
+}
