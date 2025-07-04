@@ -1,6 +1,6 @@
 ## ES|QL Example
 
-**Query statement:**
+### **Query statement:**
 ```ES|QL
 FROM azure_entra_signin_logs
 //| WHERE user.name == "user366"
@@ -18,7 +18,7 @@ FROM azure_entra_signin_logs
 | SORT user.name, max_travel_distance DESC
 ```
 
-**1. The Computer Reads Each Card** 🧐
+### **1. The Computer Reads Each Card** 🧐
 
 First, the computer looks at every single sign-in record. On each record, it only pays attention to four specific fields:
 
@@ -27,7 +27,7 @@ First, the computer looks at every single sign-in record. On each record, it onl
 - geo.location.lat: 40.71... → This is the North/South map coordinate.
 - geo.location.lon: -74.00... → This is the East/West map coordinate.
 
-**2. It Sorts the Records into Piles** 🗂️
+### **2. It Sorts the Records into Piles** 🗂️
 
 The computer gets organized. It looks at the user.name and the @timestamp on each record. It creates a separate pile for each person for each day.
 
@@ -36,7 +36,7 @@ For example, it will find all records where user.name is "user162" and the date 
 ![sort per user.name and day](img/sort.png)
 
 
-**3. It Draws an "Activity Box" for Each Pile** 🗺️
+### **3. It Draws an "Activity Box" for Each Pile** 🗺️
 
 Now, the computer looks at one pile at a time, like the pile for "user162 on June 15th". It reads the map coordinates from all the records in that pile:
 
@@ -50,7 +50,7 @@ These four points create an invisible box around all of that user's activity for
 ![box with four points](img/box.png)
 
 
-**4. It Measures the Longest Line in the Box** 📏
+### **4. It Measures the Longest Line in the Box** 📏
 
 To estimate the largest possible distance traveled, the computer measures the longest straight line it can inside the box: the diagonal.
 
@@ -59,7 +59,7 @@ It measures the distance from the top-left corner to the bottom-right corner. Th
 ![longest distance measurement](img/distance.png)
 
 
-**5. It Creates a Simple Report** 📝
+### **5. It Creates a Simple Report** 📝
 
 Finally, the computer shows a clean table with only the important info: the day, the user's name, and the final distance it calculated.
 
@@ -77,7 +77,7 @@ Finally, the computer shows a clean table with only the important info: the day,
 
 ---
 
-**Phase 1: Intra-Shard Analysis (Within each shard)**
+### **Phase 1: Intra-Shard Analysis (Within each shard)**
 
 **Step 1 & 2: Collection (``init_script`` & ``map_script``)**
 
@@ -135,7 +135,7 @@ Returns map:      Returns map:      ...
 
 ---
 
-**Phase 2: Inter-Shard Analysis (On the Coordinator Node)**
+### **Phase 2: Inter-Shard Analysis (On the Coordinator Node)**
 
 **Step 4: Final Reduction (``reduce_script``)**
 
